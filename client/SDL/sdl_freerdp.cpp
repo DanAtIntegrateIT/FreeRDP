@@ -602,6 +602,8 @@ static void sdl_cleanup_sdl(SdlContext* sdl)
 	SDL_Quit();
 }
 
+
+
 static BOOL sdl_create_windows(SdlContext* sdl)
 {
 	WINPR_ASSERT(sdl);
@@ -696,6 +698,7 @@ static BOOL sdl_wait_create_windows(SdlContext* sdl)
 
 static int sdl_run(SdlContext* sdl)
 {
+
 	int rc = -1;
 	WINPR_ASSERT(sdl);
 
@@ -733,6 +736,11 @@ static int sdl_run(SdlContext* sdl)
 			        windowEvent.type);
 #endif
 			std::lock_guard<CriticalSection> lock(sdl->critical);
+
+
+
+
+
 			switch (windowEvent.type)
 			{
 				case SDL_QUIT:

@@ -659,8 +659,7 @@ static BOOL sdl_create_windows(SdlContext* sdl)
 
 		window.window = SDL_CreateWindow(title, startupX, startupY,
 		                                 static_cast<int>(w), static_cast<int>(h), flags);
-		window.offset_x = 0-startupX;
-		window.offset_y = 0-startupY;
+
 
 
 

@@ -92,7 +92,7 @@ static BOOL freerdp_client_print_codepages(const char* arg)
 	for (size_t x = 0; x < count; x++)
 	{
 		const RDP_CODEPAGE* page = &pages[x];
-		char buffer[80] = { 0 };
+		char buffer[520] = { 0 };
 
 		if (strnlen(page->subLanguageSymbol, ARRAYSIZE(page->subLanguageSymbol)) > 0)
 			_snprintf(buffer, sizeof(buffer), "[%s|%s]", page->primaryLanguageSymbol,
@@ -2173,6 +2173,13 @@ static int parse_kbd_options(rdpSettings* settings, const COMMAND_LINE_ARGUMENT_
 				                                    bval != PARSE_OFF))
 					rc = COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
 			}
+			else if (option_starts_with("pipe:", val))
+			{
+				if (!freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, TRUE))
+					rc = COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
+				else if (!freerdp_settings_set_string(settings, FreeRDP_KeyboardPipeName, &val[5]))
+					rc = COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
+			}
 #if defined(WITH_FREERDP_DEPRECATED_COMMANDLINE)
 			else if (count == 1)
 			{
@@ -2187,6 +2194,7 @@ static int parse_kbd_options(rdpSettings* settings, const COMMAND_LINE_ARGUMENT_
 				break;
 		}
 	}
+	free(ptr);
 	return rc;
 }
 
@@ -2416,7 +2424,8 @@ static BOOL parse_gateway_type_option(rdpSettings* settings, const char* value)
 	{
 		if (!freerdp_settings_set_bool(settings, FreeRDP_GatewayRpcTransport, TRUE) ||
 		    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpTransport, FALSE) ||
-		    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpUseWebsockets, FALSE))
+		    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpUseWebsockets, FALSE) ||
+		    !freerdp_settings_set_bool(settings, FreeRDP_GatewayArmTransport, FALSE))
 			return FALSE;
 	}
 	else
@@ -2424,13 +2433,23 @@ static BOOL parse_gateway_type_option(rdpSettings* settings, const char* value)
 		if (option_equals(value, "http"))
 		{
 			if (!freerdp_settings_set_bool(settings, FreeRDP_GatewayRpcTransport, FALSE) ||
-			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpTransport, TRUE))
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpTransport, TRUE) ||
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayArmTransport, FALSE))
 				return FALSE;
 		}
 		else if (option_equals(value, "auto"))
 		{
 			if (!freerdp_settings_set_bool(settings, FreeRDP_GatewayRpcTransport, TRUE) ||
-			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpTransport, TRUE))
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpTransport, TRUE) ||
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayArmTransport, FALSE))
+				return FALSE;
+		}
+		else if (option_equals(value, "arm"))
+		{
+			if (!freerdp_settings_set_bool(settings, FreeRDP_GatewayRpcTransport, FALSE) ||
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpTransport, FALSE) ||
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayHttpUseWebsockets, FALSE) ||
+			    !freerdp_settings_set_bool(settings, FreeRDP_GatewayArmTransport, TRUE))
 				return FALSE;
 		}
 	}
@@ -2536,6 +2555,26 @@ static BOOL parse_gateway_options(rdpSettings* settings, const COMMAND_LINE_ARGU
 		if (gat)
 		{
 			if (!freerdp_settings_set_string(settings, FreeRDP_GatewayAccessToken, gat))
+				goto fail;
+			validOption = TRUE;
+			allowHttpOpts = FALSE;
+		}
+
+		const char* bearer = option_starts_with("bearer:", argval);
+		if (bearer)
+		{
+			if (!freerdp_settings_set_string(settings, FreeRDP_GatewayHttpExtAuthBearer, bearer))
+				goto fail;
+			validOption = TRUE;
+			allowHttpOpts = FALSE;
+		}
+
+		const char* gwurl = option_starts_with("url:", argval);
+		if (gwurl)
+		{
+			if (!freerdp_settings_set_string(settings, FreeRDP_GatewayUrl, gwurl))
+				goto fail;
+			if (!freerdp_set_gateway_usage_method(settings, TSC_PROXY_MODE_DIRECT))
 				goto fail;
 			validOption = TRUE;
 			allowHttpOpts = FALSE;
@@ -3980,6 +4019,42 @@ static int freerdp_client_settings_parse_command_line_arguments_int(rdpSettings*
 		CommandLineSwitchCase(arg, "mouse-relative")
 		{
 			settings->MouseUseRelativeMove = enable;
+		}
+		CommandLineSwitchCase(arg, "mouse")
+		{
+			size_t count = 0;
+			char** ptr = CommandLineParseCommaSeparatedValuesEx("mouse", arg->Value, &count);
+			UINT rc = 0;
+			if (ptr)
+			{
+				for (size_t x = 1; x < count; x++)
+				{
+					const char* cur = ptr[x];
+
+					const PARSE_ON_OFF_RESULT bval = parse_on_off_option(cur);
+					if (bval == PARSE_FAIL)
+						rc = COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
+					else
+					{
+						const BOOL val = bval != PARSE_OFF;
+						size_t key = 0;
+						if (option_starts_with("relative", cur))
+							key = FreeRDP_MouseUseRelativeMove;
+						else if (option_starts_with("grab", cur))
+							key = FreeRDP_GrabMouse;
+
+						if (!freerdp_settings_set_bool(settings, key, val))
+							rc = COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
+					}
+
+					if (rc != 0)
+						break;
+				}
+			}
+			free(ptr);
+
+			if (rc != 0)
+				return rc;
 		}
 		CommandLineSwitchCase(arg, "unmap-buttons")
 		{

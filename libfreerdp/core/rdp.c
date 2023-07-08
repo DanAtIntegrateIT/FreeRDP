@@ -542,12 +542,12 @@ BOOL rdp_read_header(rdpRdp* rdp, wStream* s, UINT16* length, UINT16* channelId)
 	{
 		int reason = 0;
 		TerminateEventArgs e = { 0 };
-		rdpContext* context;
 
 		if (!mcs_recv_disconnect_provider_ultimatum(rdp->mcs, s, &reason))
 			return FALSE;
 
-		context = rdp->context;
+		rdpContext* context = rdp->context;
+		WINPR_ASSERT(context);
 		context->disconnectUltimatum = reason;
 
 		if (rdp->errorInfo == ERRINFO_SUCCESS)
@@ -2167,9 +2167,12 @@ rdpRdp* rdp_new(rdpContext* context)
 	rdp->log = WLog_Get(RDP_TAG);
 	WINPR_ASSERT(rdp->log);
 
+	_snprintf(rdp->log_context, sizeof(rdp->log_context), "%p", context);
+	WLog_SetContext(rdp->log, NULL, rdp->log_context);
+
 	InitializeCriticalSection(&rdp->critical);
 	rdp->context = context;
-	flags = 0;
+	WINPR_ASSERT(rdp->context);
 
 	if (context->ServerMode)
 		flags |= FREERDP_SETTINGS_SERVER_MODE;
@@ -2636,6 +2639,7 @@ BOOL rdp_set_backup_settings(rdpRdp* rdp)
 BOOL rdp_reset_runtime_settings(rdpRdp* rdp)
 {
 	WINPR_ASSERT(rdp);
+	WINPR_ASSERT(rdp->context);
 
 	freerdp_settings_free(rdp->settings);
 	rdp->context->settings = rdp->settings = freerdp_settings_clone(rdp->originalSettings);

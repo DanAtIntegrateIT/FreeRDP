@@ -1045,7 +1045,8 @@ static UINT cliprdr_file_send_client_file_contents_request(CliprdrFileContext* f
 	CLIPRDR_FILE_CONTENTS_REQUEST formatFileContentsRequest = {
 		.streamId = streamId,
 		.clipDataId = lockId,
-		.haveClipDataId = cliprdr_file_context_current_flags(file) & CB_CAN_LOCK_CLIPDATA,
+		.haveClipDataId =
+		    cliprdr_file_context_current_flags(file) & CB_CAN_LOCK_CLIPDATA ? TRUE : FALSE,
 		.listIndex = listIndex,
 		.dwFlags = dwFlags
 	};
@@ -1556,12 +1557,7 @@ static void cliprdr_local_file_try_close(CliprdrLocalFile* file, UINT res, UINT6
 static UINT cliprdr_file_context_server_file_size_request(
     CliprdrFileContext* file, const CLIPRDR_FILE_CONTENTS_REQUEST* fileContentsRequest)
 {
-	wClipboardFileSizeRequest request = { 0 };
-
 	WINPR_ASSERT(fileContentsRequest);
-
-	request.streamId = fileContentsRequest->streamId;
-	request.listIndex = fileContentsRequest->listIndex;
 
 	if (fileContentsRequest->cbRequested != sizeof(UINT64))
 	{
@@ -2016,7 +2012,7 @@ static BOOL is_directory(const char* path)
 	if (!status)
 		return FALSE;
 
-	return fileInformation.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+	return (fileInformation.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? TRUE : FALSE;
 }
 
 static BOOL add_directory(CliprdrLocalStream* stream, const char* path)

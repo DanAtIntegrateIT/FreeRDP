@@ -177,7 +177,7 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "g:<gateway>[:<port>],u:<user>,d:<domain>,p:<password>,usage-method:["
 	  "direct|detect],access-token:<"
 	  "token>,type:[rpc|http[,no-websockets][,extauth-sspi-ntlm]|auto[,no-websockets][,extauth-"
-	  "sspi-ntlm]],",
+	  "sspi-ntlm]]|arm,url:<wss://url>,bearer:<oauth2-bearer-token>",
 	  NULL, NULL, -1, "gw", "Gateway Hostname" },
 #if defined(WITH_FREERDP_DEPRECATED_COMMANDLINE)
 	{ "g", COMMAND_LINE_VALUE_REQUIRED, "<gateway>[:<port>]", NULL, NULL, -1, NULL,
@@ -248,12 +248,13 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 #endif
 	{ "kbd", COMMAND_LINE_VALUE_REQUIRED,
 	  "[layout:[0x<id>|<name>],lang:<0x<id>>,fn-key:<value>,type:<value>,subtype:<value>,unicode[:"
-	  "on|off],remap:<key1>=<value1>,remap:<key2>=<value2>]",
+	  "on|off],remap:<key1>=<value1>,remap:<key2>=<value2>,pipe:<filename>]",
 	  NULL, NULL, -1, NULL,
 	  "Keyboard related options:"
 	  "* layout: set the keybouard layout announced to the server"
 	  "* lang: set the keyboard language identifier sent to the server"
-	  "* fn-key: Function key value" },
+	  "* fn-key: Function key value"
+	  "* pipe: Name of a named pipe that can be used to type text into the RDP session" },
 #if defined(WITH_FREERDP_DEPRECATED_COMMANDLINE)
 	{ "kbd-lang", COMMAND_LINE_VALUE_REQUIRED, "0x<id>", NULL, NULL, -1, NULL,
 	  "[DEPRECATED, use / kbd:lang:<value>] Keyboard active language identifier" },
@@ -311,6 +312,11 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Send mouse motion" },
 	{ "mouse-relative", COMMAND_LINE_VALUE_BOOL, NULL, BoolValueTrue, NULL, -1, NULL,
 	  "Send mouse motion with relative addressing" },
+	{ "mouse", COMMAND_LINE_VALUE_REQUIRED, "[relative:[on|off],grab:[on|off]]", NULL, NULL, -1,
+	  NULL,
+	  "Mouse related options:"
+	  "* relative:   send relative mouse movements if supported by server"
+	  "* grab:       grab the mouse if within the window" },
 #if defined(CHANNEL_TSMF_CLIENT)
 	{ "multimedia", COMMAND_LINE_VALUE_OPTIONAL, "[sys:<sys>,][dev:<dev>,][decoder:<decoder>]",
 	  NULL, NULL, -1, "mmr", "[DEPRECATED], use /video] Redirect multimedia (video)" },

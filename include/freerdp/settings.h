@@ -766,6 +766,9 @@ extern "C"
 #define FreeRDP_GatewayAcceptedCertLength (1999)
 #define FreeRDP_GatewayHttpUseWebsockets (2000)
 #define FreeRDP_GatewayHttpExtAuthSspiNtlm (2001)
+#define FreeRDP_GatewayHttpExtAuthBearer (2002)
+#define FreeRDP_GatewayUrl (2003)
+#define FreeRDP_GatewayArmTransport (2004)
 #define FreeRDP_ProxyType (2015)
 #define FreeRDP_ProxyHostname (2016)
 #define FreeRDP_ProxyPort (2017)
@@ -842,6 +845,7 @@ extern "C"
 #define FreeRDP_HasHorizontalWheel (2634)
 #define FreeRDP_HasExtendedMouseEvent (2635)
 #define FreeRDP_SuspendInput (2636)
+#define FreeRDP_KeyboardPipeName (2637)
 #define FreeRDP_BrushSupportLevel (2688)
 #define FreeRDP_GlyphSupportLevel (2752)
 #define FreeRDP_GlyphCache (2753)
@@ -1340,7 +1344,10 @@ extern "C"
 		ALIGN64 UINT32 GatewayAcceptedCertLength; /* 1999 */
 		ALIGN64 BOOL GatewayHttpUseWebsockets;    /* 2000 */
 		ALIGN64 BOOL GatewayHttpExtAuthSspiNtlm;  /* 2001 */
-		UINT64 padding2015[2015 - 2002];          /* 2002 */
+		ALIGN64 char* GatewayHttpExtAuthBearer;   /* 2002 */
+		ALIGN64 char* GatewayUrl;                 /* 2003 */
+		ALIGN64 BOOL GatewayArmTransport;         /* 2004 */
+		UINT64 padding2015[2015 - 2005];          /* 2005 */
 
 		/* Proxy */
 		ALIGN64 UINT32 ProxyType;        /* 2015 */
@@ -1457,7 +1464,8 @@ extern "C"
 		 * input
 		 */
 		ALIGN64 BOOL SuspendInput;       /* 2636 */
-		UINT64 padding2688[2688 - 2637]; /* 2637 */
+		ALIGN64 char* KeyboardPipeName;  /* 2637 */
+		UINT64 padding2688[2688 - 2638]; /* 2638 */
 
 		/* Brush Capabilities */
 		ALIGN64 UINT32 BrushSupportLevel; /* 2688 */

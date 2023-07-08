@@ -661,7 +661,8 @@ BOOL rdp_client_redirect(rdpRdp* rdp)
 			return FALSE;
 	}
 
-	settings->RdstlsSecurity = settings->RedirectionFlags & LB_PASSWORD_IS_PK_ENCRYPTED;
+	settings->RdstlsSecurity =
+	    (settings->RedirectionFlags & LB_PASSWORD_IS_PK_ENCRYPTED) != 0 ? TRUE : FALSE;
 
 	WINPR_ASSERT(rdp->context);
 	WINPR_ASSERT(rdp->context->instance);
@@ -1742,7 +1743,10 @@ BOOL rdp_server_transition_to_state(rdpRdp* rdp, CONNECTION_STATE state)
 	const CONNECTION_STATE cstate = rdp_get_state(rdp);
 
 	if (cstate >= CONNECTION_STATE_RDP_SECURITY_COMMENCEMENT)
+	{
+		WINPR_ASSERT(rdp->context);
 		client = rdp->context->peer;
+	}
 
 	if (!rdp_is_active_peer_state(cstate))
 	{

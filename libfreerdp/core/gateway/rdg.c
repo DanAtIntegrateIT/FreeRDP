@@ -34,6 +34,7 @@
 #include <freerdp/utils/smartcardlogon.h>
 
 #include "rdg.h"
+#include "websocket.h"
 #include "../credssp_auth.h"
 #include "../proxy.h"
 #include "../rdp.h"
@@ -56,6 +57,7 @@
 #define HTTP_EXTENDED_AUTH_SC 0x1         /* Smart card authentication. */
 #define HTTP_EXTENDED_AUTH_PAA 0x02       /* Pluggable authentication. */
 #define HTTP_EXTENDED_AUTH_SSPI_NTLM 0x04 /* NTLM extended authentication. */
+#define HTTP_EXTENDED_AUTH_BEARER 0x08    /* HTTP Bearer authentication. */
 
 /* HTTP packet types. */
 #define PKT_TYPE_HANDSHAKE_REQUEST 0x1
@@ -109,65 +111,14 @@
 #define HTTP_CAPABILITY_REAUTH 0x10
 #define HTTP_CAPABILITY_UDP_TRANSPORT 0x20
 
-#define WEBSOCKET_MASK_BIT 0x80
-#define WEBSOCKET_FIN_BIT 0x80
-
-typedef enum
-{
-	WebsocketContinuationOpcode = 0x0,
-	WebsocketTextOpcode = 0x1,
-	WebsocketBinaryOpcode = 0x2,
-	WebsocketCloseOpcode = 0x8,
-	WebsocketPingOpcode = 0x9,
-	WebsocketPongOpcode = 0xa,
-} WEBSOCKET_OPCODE;
-
-typedef enum
-{
-	WebsocketStateOpcodeAndFin,
-	WebsocketStateLengthAndMasking,
-	WebsocketStateShortLength,
-	WebsocketStateLongLength,
-	WebSocketStateMaskingKey,
-	WebSocketStatePayload,
-} WEBSOCKET_STATE;
-
-typedef struct
-{
-	size_t payloadLength;
-	uint32_t maskingKey;
-	BOOL masking;
-	BOOL closeSent;
-	BYTE opcode;
-	BYTE fragmentOriginalOpcode;
-	BYTE lengthAndMaskPosition;
-	WEBSOCKET_STATE state;
-	wStream* responseStreamBuffer;
-} rdg_http_websocket_context;
-
-typedef enum
-{
-	ChunkStateLenghHeader,
-	ChunkStateData,
-	ChunkStateFooter
-} CHUNK_STATE;
-
-typedef struct
-{
-	size_t nextOffset;
-	size_t headerFooterPos;
-	CHUNK_STATE state;
-	char lenBuffer[11];
-} rdg_http_encoding_chunked_context;
-
 typedef struct
 {
 	TRANSFER_ENCODING httpTransferEncoding;
 	BOOL isWebsocketTransport;
 	union _context
 	{
-		rdg_http_encoding_chunked_context chunked;
-		rdg_http_websocket_context websocket;
+		http_encoding_chunked_context chunked;
+		websocket_context websocket;
 	} context;
 } rdg_http_encoding_context;
 
@@ -377,524 +328,16 @@ static BOOL rdg_write_chunked(BIO* bio, wStream* sPacket)
 	return TRUE;
 }
 
-static BOOL rdg_write_websocket(BIO* bio, wStream* sPacket, WEBSOCKET_OPCODE opcode)
-{
-	size_t len;
-	size_t fullLen;
-	int status;
-	wStream* sWS;
-
-	uint32_t maskingKey;
-
-	size_t streamPos;
-
-	len = Stream_Length(sPacket);
-	Stream_SetPosition(sPacket, 0);
-
-	if (len > INT_MAX)
-		return FALSE;
-
-	if (len < 126)
-		fullLen = len + 6; /* 2 byte "mini header" + 4 byte masking key */
-	else if (len < 0x10000)
-		fullLen = len + 8; /* 2 byte "mini header" + 2 byte length + 4 byte masking key */
-	else
-		fullLen = len + 14; /* 2 byte "mini header" + 8 byte length + 4 byte masking key */
-
-	sWS = Stream_New(NULL, fullLen);
-	if (!sWS)
-		return FALSE;
-
-	winpr_RAND((BYTE*)&maskingKey, 4);
-
-	Stream_Write_UINT8(sWS, WEBSOCKET_FIN_BIT | opcode);
-	if (len < 126)
-		Stream_Write_UINT8(sWS, len | WEBSOCKET_MASK_BIT);
-	else if (len < 0x10000)
-	{
-		Stream_Write_UINT8(sWS, 126 | WEBSOCKET_MASK_BIT);
-		Stream_Write_UINT16_BE(sWS, len);
-	}
-	else
-	{
-		Stream_Write_UINT8(sWS, 127 | WEBSOCKET_MASK_BIT);
-		Stream_Write_UINT32_BE(sWS, 0); /* payload is limited to INT_MAX */
-		Stream_Write_UINT32_BE(sWS, len);
-	}
-	Stream_Write_UINT32(sWS, maskingKey);
-
-	/* mask as much as possible with 32bit access */
-	for (streamPos = 0; streamPos + 4 <= len; streamPos += 4)
-	{
-		uint32_t data;
-		Stream_Read_UINT32(sPacket, data);
-		Stream_Write_UINT32(sWS, data ^ maskingKey);
-	}
-
-	/* mask the rest byte by byte */
-	for (; streamPos < len; streamPos++)
-	{
-		BYTE data;
-		BYTE* partialMask = ((BYTE*)&maskingKey) + (streamPos % 4);
-		Stream_Read_UINT8(sPacket, data);
-		Stream_Write_UINT8(sWS, data ^ *partialMask);
-	}
-
-	Stream_SealLength(sWS);
-
-	ERR_clear_error();
-	status = BIO_write(bio, Stream_Buffer(sWS), Stream_Length(sWS));
-	Stream_Free(sWS, TRUE);
-
-	if (status != (SSIZE_T)fullLen)
-		return FALSE;
-
-	return TRUE;
-}
-
 static BOOL rdg_write_packet(rdpRdg* rdg, wStream* sPacket)
 {
 	if (rdg->transferEncoding.isWebsocketTransport)
 	{
 		if (rdg->transferEncoding.context.websocket.closeSent)
 			return FALSE;
-		return rdg_write_websocket(rdg->tlsOut->bio, sPacket, WebsocketBinaryOpcode);
+		return websocket_write_wstream(rdg->tlsOut->bio, sPacket, WebsocketBinaryOpcode);
 	}
 
 	return rdg_write_chunked(rdg->tlsIn->bio, sPacket);
-}
-
-static int rdg_websocket_read_data(BIO* bio, BYTE* pBuffer, size_t size,
-                                   rdg_http_websocket_context* encodingContext)
-{
-	int status;
-
-	if (encodingContext->payloadLength == 0)
-	{
-		encodingContext->state = WebsocketStateOpcodeAndFin;
-		return 0;
-	}
-
-	ERR_clear_error();
-	status =
-	    BIO_read(bio, pBuffer,
-	             (encodingContext->payloadLength < size ? encodingContext->payloadLength : size));
-	if (status <= 0)
-		return status;
-
-	encodingContext->payloadLength -= status;
-
-	if (encodingContext->payloadLength == 0)
-		encodingContext->state = WebsocketStateOpcodeAndFin;
-
-	return status;
-}
-
-static int rdg_websocket_read_discard(BIO* bio, rdg_http_websocket_context* encodingContext)
-{
-	char _dummy[256];
-	int status;
-
-	if (encodingContext->payloadLength == 0)
-	{
-		encodingContext->state = WebsocketStateOpcodeAndFin;
-		return 0;
-	}
-
-	ERR_clear_error();
-	status = BIO_read(bio, _dummy, sizeof(_dummy));
-	if (status <= 0)
-		return status;
-
-	encodingContext->payloadLength -= status;
-
-	if (encodingContext->payloadLength == 0)
-		encodingContext->state = WebsocketStateOpcodeAndFin;
-
-	return status;
-}
-
-static int rdg_websocket_read_wstream(BIO* bio, wStream* s,
-                                      rdg_http_websocket_context* encodingContext)
-{
-	int status;
-
-	if (encodingContext->payloadLength == 0)
-	{
-		encodingContext->state = WebsocketStateOpcodeAndFin;
-		return 0;
-	}
-	if (s == NULL)
-	{
-		WLog_WARN(TAG, "wStream* s=%p", s);
-		return -1;
-	}
-	if (Stream_GetRemainingCapacity(s) != encodingContext->payloadLength)
-	{
-		WLog_WARN(TAG,
-		          "wStream::capacity [%" PRIuz "] != encodingContext::paylaodLangth [%" PRIuz "]",
-		          Stream_GetRemainingCapacity(s), encodingContext->payloadLength);
-		return -1;
-	}
-
-	ERR_clear_error();
-	status = BIO_read(bio, Stream_Pointer(s), encodingContext->payloadLength);
-	if (status <= 0)
-		return status;
-
-	Stream_Seek(s, status);
-
-	encodingContext->payloadLength -= status;
-
-	if (encodingContext->payloadLength == 0)
-	{
-		encodingContext->state = WebsocketStateOpcodeAndFin;
-		Stream_SealLength(s);
-		Stream_SetPosition(s, 0);
-	}
-
-	return status;
-}
-
-static BOOL rdg_websocket_reply_close(BIO* bio, wStream* s)
-{
-	/* write back close */
-	wStream* closeFrame;
-	uint16_t maskingKey1;
-	uint16_t maskingKey2;
-	int status;
-	size_t closeDataLen;
-
-	closeDataLen = 0;
-	if (s != NULL && Stream_Length(s) >= 2)
-		closeDataLen = 2;
-
-	closeFrame = Stream_New(NULL, 6 + closeDataLen);
-	if (!closeFrame)
-		return FALSE;
-
-	Stream_Write_UINT8(closeFrame, WEBSOCKET_FIN_BIT | WebsocketPongOpcode);
-	Stream_Write_UINT8(closeFrame, closeDataLen | WEBSOCKET_MASK_BIT); /* no payload */
-	winpr_RAND((BYTE*)&maskingKey1, 2);
-	winpr_RAND((BYTE*)&maskingKey2, 2);
-	Stream_Write_UINT16(closeFrame, maskingKey1);
-	Stream_Write_UINT16(closeFrame, maskingKey2); /* unused half, max 2 bytes of data */
-
-	if (closeDataLen == 2)
-	{
-		uint16_t data;
-		Stream_Read_UINT16(s, data);
-		Stream_Write_UINT16(closeFrame, data ^ maskingKey1);
-	}
-	Stream_SealLength(closeFrame);
-
-	ERR_clear_error();
-	status = BIO_write(bio, Stream_Buffer(closeFrame), Stream_Length(closeFrame));
-	Stream_Free(closeFrame, TRUE);
-
-	/* server MUST close socket now. The server is not allowed anymore to
-	 * send frames but if he does, nothing bad would happen */
-	if (status < 0)
-		return FALSE;
-	return TRUE;
-}
-
-static BOOL rdg_websocket_reply_pong(BIO* bio, wStream* s)
-{
-	wStream* closeFrame;
-	uint32_t maskingKey;
-	int status;
-
-	if (s != NULL)
-		return rdg_write_websocket(bio, s, WebsocketPongOpcode);
-
-	closeFrame = Stream_New(NULL, 6);
-	if (!closeFrame)
-		return FALSE;
-
-	Stream_Write_UINT8(closeFrame, WEBSOCKET_FIN_BIT | WebsocketPongOpcode);
-	Stream_Write_UINT8(closeFrame, 0 | WEBSOCKET_MASK_BIT); /* no payload */
-	winpr_RAND((BYTE*)&maskingKey, 4);
-	Stream_Write_UINT32(closeFrame, maskingKey); /* dummy masking key. */
-	Stream_SealLength(closeFrame);
-
-	ERR_clear_error();
-	status = BIO_write(bio, Stream_Buffer(closeFrame), Stream_Length(closeFrame));
-	Stream_Free(closeFrame, TRUE);
-
-	if (status < 0)
-		return FALSE;
-	return TRUE;
-}
-
-static int rdg_websocket_handle_payload(BIO* bio, BYTE* pBuffer, size_t size,
-                                        rdg_http_websocket_context* encodingContext)
-{
-	int status;
-	BYTE effectiveOpcode = ((encodingContext->opcode & 0xf) == WebsocketContinuationOpcode
-	                            ? encodingContext->fragmentOriginalOpcode & 0xf
-	                            : encodingContext->opcode & 0xf);
-
-	switch (effectiveOpcode)
-	{
-		case WebsocketBinaryOpcode:
-		{
-			status = rdg_websocket_read_data(bio, pBuffer, size, encodingContext);
-			if (status < 0)
-				return status;
-
-			return status;
-		}
-		case WebsocketPingOpcode:
-		{
-			if (encodingContext->responseStreamBuffer == NULL)
-				encodingContext->responseStreamBuffer =
-				    Stream_New(NULL, encodingContext->payloadLength);
-
-			status = rdg_websocket_read_wstream(bio, encodingContext->responseStreamBuffer,
-			                                    encodingContext);
-			if (status < 0)
-				return status;
-
-			if (encodingContext->payloadLength == 0)
-			{
-				if (!encodingContext->closeSent)
-					rdg_websocket_reply_pong(bio, encodingContext->responseStreamBuffer);
-
-				if (encodingContext->responseStreamBuffer)
-					Stream_Free(encodingContext->responseStreamBuffer, TRUE);
-				encodingContext->responseStreamBuffer = NULL;
-			}
-		}
-		break;
-		case WebsocketCloseOpcode:
-		{
-			if (encodingContext->responseStreamBuffer == NULL)
-				encodingContext->responseStreamBuffer =
-				    Stream_New(NULL, encodingContext->payloadLength);
-
-			status = rdg_websocket_read_wstream(bio, encodingContext->responseStreamBuffer,
-			                                    encodingContext);
-			if (status < 0)
-				return status;
-
-			if (encodingContext->payloadLength == 0)
-			{
-				rdg_websocket_reply_close(bio, encodingContext->responseStreamBuffer);
-				encodingContext->closeSent = TRUE;
-
-				if (encodingContext->responseStreamBuffer)
-					Stream_Free(encodingContext->responseStreamBuffer, TRUE);
-				encodingContext->responseStreamBuffer = NULL;
-			}
-		}
-		break;
-		default:
-			WLog_WARN(TAG, "Unimplemented websocket opcode %x. Dropping", effectiveOpcode & 0xf);
-
-			status = rdg_websocket_read_discard(bio, encodingContext);
-			if (status < 0)
-				return status;
-	}
-	/* return how many bytes have been written to pBuffer.
-	 * Only WebsocketBinaryOpcode writes into it and it returns directly */
-	return 0;
-}
-
-static int rdg_websocket_read(BIO* bio, BYTE* pBuffer, size_t size,
-                              rdg_http_websocket_context* encodingContext)
-{
-	int status;
-	int effectiveDataLen = 0;
-	WINPR_ASSERT(encodingContext != NULL);
-	while (TRUE)
-	{
-		switch (encodingContext->state)
-		{
-			case WebsocketStateOpcodeAndFin:
-			{
-				BYTE buffer[1];
-				ERR_clear_error();
-				status = BIO_read(bio, (char*)buffer, 1);
-				if (status <= 0)
-					return (effectiveDataLen > 0 ? effectiveDataLen : status);
-
-				encodingContext->opcode = buffer[0];
-				if (((encodingContext->opcode & 0xf) != WebsocketContinuationOpcode) &&
-				    (encodingContext->opcode & 0xf) < 0x08)
-					encodingContext->fragmentOriginalOpcode = encodingContext->opcode;
-				encodingContext->state = WebsocketStateLengthAndMasking;
-			}
-			break;
-			case WebsocketStateLengthAndMasking:
-			{
-				BYTE buffer[1];
-				BYTE len;
-				ERR_clear_error();
-				status = BIO_read(bio, (char*)buffer, 1);
-				if (status <= 0)
-					return (effectiveDataLen > 0 ? effectiveDataLen : status);
-
-				encodingContext->masking = ((buffer[0] & WEBSOCKET_MASK_BIT) == WEBSOCKET_MASK_BIT);
-				encodingContext->lengthAndMaskPosition = 0;
-				encodingContext->payloadLength = 0;
-				len = buffer[0] & 0x7f;
-				if (len < 126)
-				{
-					encodingContext->payloadLength = len;
-					encodingContext->state = (encodingContext->masking ? WebSocketStateMaskingKey
-					                                                   : WebSocketStatePayload);
-				}
-				else if (len == 126)
-					encodingContext->state = WebsocketStateShortLength;
-				else
-					encodingContext->state = WebsocketStateLongLength;
-			}
-			break;
-			case WebsocketStateShortLength:
-			case WebsocketStateLongLength:
-			{
-				BYTE buffer[1];
-				BYTE lenLength = (encodingContext->state == WebsocketStateShortLength ? 2 : 8);
-				while (encodingContext->lengthAndMaskPosition < lenLength)
-				{
-					ERR_clear_error();
-					status = BIO_read(bio, (char*)buffer, 1);
-					if (status <= 0)
-						return (effectiveDataLen > 0 ? effectiveDataLen : status);
-
-					encodingContext->payloadLength =
-					    (encodingContext->payloadLength) << 8 | buffer[0];
-					encodingContext->lengthAndMaskPosition += status;
-				}
-				encodingContext->state =
-				    (encodingContext->masking ? WebSocketStateMaskingKey : WebSocketStatePayload);
-			}
-			break;
-			case WebSocketStateMaskingKey:
-			{
-				WLog_WARN(
-				    TAG, "Websocket Server sends data with masking key. This is against RFC 6455.");
-				return -1;
-			}
-			case WebSocketStatePayload:
-			{
-				status = rdg_websocket_handle_payload(bio, pBuffer, size, encodingContext);
-				if (status < 0)
-					return (effectiveDataLen > 0 ? effectiveDataLen : status);
-
-				effectiveDataLen += status;
-
-				if ((size_t)status == size)
-					return effectiveDataLen;
-				pBuffer += status;
-				size -= status;
-			}
-		}
-	}
-	/* should be unreachable */
-}
-
-static int rdg_chuncked_read(BIO* bio, BYTE* pBuffer, size_t size,
-                             rdg_http_encoding_chunked_context* encodingContext)
-{
-	int status;
-	int effectiveDataLen = 0;
-	WINPR_ASSERT(encodingContext != NULL);
-	while (TRUE)
-	{
-		switch (encodingContext->state)
-		{
-			case ChunkStateData:
-			{
-				ERR_clear_error();
-				status = BIO_read(
-				    bio, pBuffer,
-				    (size > encodingContext->nextOffset ? encodingContext->nextOffset : size));
-				if (status <= 0)
-					return (effectiveDataLen > 0 ? effectiveDataLen : status);
-
-				encodingContext->nextOffset -= status;
-				if (encodingContext->nextOffset == 0)
-				{
-					encodingContext->state = ChunkStateFooter;
-					encodingContext->headerFooterPos = 0;
-				}
-				effectiveDataLen += status;
-
-				if ((size_t)status == size)
-					return effectiveDataLen;
-
-				pBuffer += status;
-				size -= status;
-			}
-			break;
-			case ChunkStateFooter:
-			{
-				char _dummy[2];
-				WINPR_ASSERT(encodingContext->nextOffset == 0);
-				WINPR_ASSERT(encodingContext->headerFooterPos < 2);
-				ERR_clear_error();
-				status = BIO_read(bio, _dummy, 2 - encodingContext->headerFooterPos);
-				if (status >= 0)
-				{
-					encodingContext->headerFooterPos += status;
-					if (encodingContext->headerFooterPos == 2)
-					{
-						encodingContext->state = ChunkStateLenghHeader;
-						encodingContext->headerFooterPos = 0;
-					}
-				}
-				else
-					return (effectiveDataLen > 0 ? effectiveDataLen : status);
-			}
-			break;
-			case ChunkStateLenghHeader:
-			{
-				BOOL _haveNewLine = FALSE;
-				char* dst = &encodingContext->lenBuffer[encodingContext->headerFooterPos];
-				WINPR_ASSERT(encodingContext->nextOffset == 0);
-				while (encodingContext->headerFooterPos < 10 && !_haveNewLine)
-				{
-					ERR_clear_error();
-					status = BIO_read(bio, dst, 1);
-					if (status >= 0)
-					{
-						if (*dst == '\n')
-							_haveNewLine = TRUE;
-						encodingContext->headerFooterPos += status;
-						dst += status;
-					}
-					else
-						return (effectiveDataLen > 0 ? effectiveDataLen : status);
-				}
-				*dst = '\0';
-				/* strtoul is tricky, error are reported via errno, we also need
-				 * to ensure the result does not overflow */
-				errno = 0;
-				size_t tmp = strtoul(encodingContext->lenBuffer, NULL, 16);
-				if ((errno != 0) || (tmp > SIZE_MAX))
-					return -1;
-				encodingContext->nextOffset = tmp;
-				encodingContext->state = ChunkStateData;
-
-				if (encodingContext->nextOffset == 0)
-				{ /* end of stream */
-					int fd = BIO_get_fd(bio, NULL);
-					if (fd >= 0)
-						closesocket((SOCKET)fd);
-
-					WLog_WARN(TAG, "cunked encoding end of stream received");
-					encodingContext->headerFooterPos = 0;
-					encodingContext->state = ChunkStateFooter;
-				}
-			}
-			break;
-			default:
-				/* invalid state */
-				return -1;
-		}
-	}
 }
 
 static int rdg_socket_read(BIO* bio, BYTE* pBuffer, size_t size,
@@ -904,7 +347,7 @@ static int rdg_socket_read(BIO* bio, BYTE* pBuffer, size_t size,
 
 	if (encodingContext->isWebsocketTransport)
 	{
-		return rdg_websocket_read(bio, pBuffer, size, &encodingContext->context.websocket);
+		return websocket_read(bio, pBuffer, size, &encodingContext->context.websocket);
 	}
 
 	switch (encodingContext->httpTransferEncoding)
@@ -913,7 +356,7 @@ static int rdg_socket_read(BIO* bio, BYTE* pBuffer, size_t size,
 			ERR_clear_error();
 			return BIO_read(bio, pBuffer, size);
 		case TransferEncodingChunked:
-			return rdg_chuncked_read(bio, pBuffer, size, &encodingContext->context.chunked);
+			return http_chuncked_read(bio, pBuffer, size, &encodingContext->context.chunked);
 		default:
 			return -1;
 	}
@@ -1236,6 +679,12 @@ static wStream* rdg_build_http_request(rdpRdg* rdg, const char* method,
 	{
 		if (!rdg_set_auth_header(rdg->auth, request))
 			goto out;
+	}
+
+	else if (rdg->extAuth == HTTP_EXTENDED_AUTH_BEARER)
+	{
+		http_request_set_auth_scheme(request, "Bearer");
+		http_request_set_auth_param(request, rdg->settings->GatewayHttpExtAuthBearer);
 	}
 
 	http_request_set_transfer_encoding(request, transferEncoding);
@@ -1861,6 +1310,8 @@ static BOOL rdg_establish_data_connection(rdpRdg* rdg, rdpTls* tls, const char* 
 		return FALSE;
 
 	WINPR_ASSERT(rpcFallback);
+	if (rdg->settings->GatewayHttpExtAuthBearer && rdg->extAuth == HTTP_EXTENDED_AUTH_NONE)
+		rdg->extAuth = HTTP_EXTENDED_AUTH_BEARER;
 	if (rdg->extAuth == HTTP_EXTENDED_AUTH_NONE)
 	{
 		if (!rdg_auth_init(rdg, tls, AUTH_PKG))
@@ -2126,7 +1577,7 @@ static int rdg_write_websocket_data_packet(rdpRdg* rdg, const BYTE* buf, int isi
 
 	int streamPos;
 
-	winpr_RAND((BYTE*)&maskingKey, 4);
+	winpr_RAND(&maskingKey, 4);
 
 	payloadSize = isize + 10;
 	if ((isize < 0) || (isize > UINT16_MAX))

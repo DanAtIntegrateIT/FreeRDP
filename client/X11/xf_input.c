@@ -125,8 +125,44 @@ static BOOL register_input_events(xfContext* xfc, Window window)
 					XISetMask(masks[nmasks], XI_ButtonRelease);
 					XISetMask(masks[nmasks], XI_Motion);
 					used = TRUE;
+					break;
 				}
-				break;
+				case XIValuatorClass:
+				{
+					const XIValuatorClassInfo* t = (const XIValuatorClassInfo*)class;
+					char* name = t->label ? XGetAtomName(xfc->display, t->label) : NULL;
+
+					WLog_DBG(TAG, "%s device (id: %d) valuator %d label %s range %f - %f",
+					         dev->name, dev->deviceid, t->number, name ? name : "None", t->min,
+					         t->max);
+					free(name);
+
+					if (t->number == 2)
+					{
+						double max_pressure = t->max;
+
+						if (strstr(dev->name, "Stylus Pen") || strstr(dev->name, "Pen Pen"))
+						{
+							if (!freerdp_client_handle_pen(
+							        &xfc->common, FREERDP_PEN_REGISTER | FREERDP_PEN_HAS_PRESSURE,
+							        dev->deviceid, max_pressure))
+								return FALSE;
+							WLog_DBG(TAG, "registered pen");
+						}
+						else if (strstr(dev->name, "Stylus Eraser") ||
+						         strstr(dev->name, "Pen Eraser"))
+						{
+							if (!freerdp_client_handle_pen(&xfc->common,
+							                               FREERDP_PEN_REGISTER |
+							                                   FREERDP_PEN_IS_INVERTED |
+							                                   FREERDP_PEN_HAS_PRESSURE,
+							                               dev->deviceid, max_pressure))
+								return FALSE;
+							WLog_DBG(TAG, "registered eraser");
+						}
+					}
+					break;
+				}
 				default:
 					break;
 			}
@@ -174,6 +210,29 @@ static BOOL register_raw_events(xfContext* xfc, Window window)
 	return TRUE;
 }
 
+static BOOL register_device_events(xfContext* xfc, Window window)
+{
+	XIEventMask mask;
+	unsigned char mask_bytes[XIMaskLen(XI_LASTEVENT)] = { 0 };
+	rdpSettings* settings;
+
+	WINPR_ASSERT(xfc);
+
+	settings = xfc->common.context.settings;
+	WINPR_ASSERT(settings);
+
+	XISetMask(mask_bytes, XI_DeviceChanged);
+	XISetMask(mask_bytes, XI_HierarchyChanged);
+
+	mask.deviceid = XIAllDevices;
+	mask.mask_len = sizeof(mask_bytes);
+	mask.mask = mask_bytes;
+
+	XISelectEvents(xfc->display, window, &mask, 1);
+
+	return TRUE;
+}
+
 int xf_input_init(xfContext* xfc, Window window)
 {
 	int major = XI_2_Major;
@@ -213,6 +272,8 @@ int xf_input_init(xfContext* xfc, Window window)
 		if (!register_raw_events(xfc, root))
 			return -1;
 		if (!register_input_events(xfc, window))
+			return -1;
+		if (!register_device_events(xfc, window))
 			return -1;
 	}
 
@@ -620,6 +681,65 @@ static int xf_input_touch_remote(xfContext* xfc, XIDeviceEvent* event, int evtyp
 	return 0;
 }
 
+static int xf_input_pen_remote(xfContext* xfc, XIDeviceEvent* event, int evtype, int deviceid)
+{
+	int x, y;
+	RdpeiClientContext* rdpei = xfc->common.rdpei;
+
+	if (!rdpei)
+		return 0;
+
+	xf_input_hide_cursor(xfc);
+	x = (int)event->event_x;
+	y = (int)event->event_y;
+	xf_event_adjust_coordinates(xfc, &x, &y);
+
+	double pressure = 0.0;
+	double* val = event->valuators.values;
+	for (int i = 0; i < MIN(event->valuators.mask_len * 8, 3); i++)
+	{
+		if (XIMaskIsSet(event->valuators.mask, i))
+		{
+			double value = *val++;
+			if (i == 2)
+				pressure = value;
+		}
+	}
+
+	switch (evtype)
+	{
+		case XI_ButtonPress:
+			if (!freerdp_client_handle_pen(&xfc->common,
+			                               FREERDP_PEN_PRESS | FREERDP_PEN_HAS_PRESSURE, deviceid,
+			                               x, y, pressure))
+				return FALSE;
+			break;
+		case XI_Motion:
+			if (!freerdp_client_handle_pen(&xfc->common,
+			                               FREERDP_PEN_MOTION | FREERDP_PEN_HAS_PRESSURE, deviceid,
+			                               x, y, pressure))
+				return FALSE;
+			break;
+		case XI_ButtonRelease:
+			if (!freerdp_client_handle_pen(&xfc->common,
+			                               FREERDP_PEN_RELEASE | FREERDP_PEN_HAS_PRESSURE, deviceid,
+			                               x, y, pressure))
+				return FALSE;
+			break;
+		default:
+			break;
+	}
+	return 0;
+}
+
+static int xf_input_pens_unhover(xfContext* xfc)
+{
+	WINPR_ASSERT(xfc);
+
+	freerdp_client_pen_cancel_all(&xfc->common);
+	return 0;
+}
+
 int xf_input_event(xfContext* xfc, const XEvent* xevent, XIDeviceEvent* event, int evtype)
 {
 	const rdpSettings* settings;
@@ -688,6 +808,29 @@ int xf_input_event(xfContext* xfc, const XEvent* xevent, XIDeviceEvent* event, i
 				xf_generic_RawMotionNotify(xfc, (int)x, (int)y, event->event, xfc->remote_app);
 			}
 			break;
+		case XI_DeviceChanged:
+		{
+			const XIDeviceChangedEvent* ev = (const XIDeviceChangedEvent*)event;
+			if (ev->reason != XIDeviceChange)
+				break;
+
+			/*
+			 * TODO:
+			 * 1. Register only changed devices.
+			 * 2. Both `XIDeviceChangedEvent` and `XIHierarchyEvent` have no target
+			 *    `Window` which is used to register xinput events. So assume
+			 *    `xfc->window` created by `xf_CreateDesktopWindow` is the same
+			 *    `Window` we registered.
+			 */
+			if (xfc->window)
+				register_input_events(xfc, xfc->window->handle);
+		}
+		break;
+		case XI_HierarchyChanged:
+			if (xfc->window)
+				register_input_events(xfc, xfc->window->handle);
+			break;
+
 		default:
 			WLog_WARN(TAG, "Unhandled event %d: Event was registered but is not handled!", evtype);
 			break;
@@ -711,12 +854,27 @@ static int xf_input_handle_event_remote(xfContext* xfc, const XEvent* event)
 		switch (cookie.cc->evtype)
 		{
 			case XI_TouchBegin:
+				xf_input_pens_unhover(xfc);
 			case XI_TouchUpdate:
 			case XI_TouchEnd:
 				xf_input_touch_remote(xfc, cookie.cc->data, cookie.cc->evtype);
 				break;
+			case XI_ButtonPress:
+			case XI_Motion:
+			case XI_ButtonRelease:
+			{
+				WLog_DBG(TAG, "checking for pen");
+				XIDeviceEvent* deviceEvent = (XIDeviceEvent*)cookie.cc->data;
+				int deviceid = deviceEvent->deviceid;
 
+				if (freerdp_client_is_pen(&xfc->common, deviceid))
+				{
+					xf_input_pen_remote(xfc, cookie.cc->data, cookie.cc->evtype, deviceid);
+					break;
+				}
+			}
 			default:
+				xf_input_pens_unhover(xfc);
 				xf_input_event(xfc, event, cookie.cc->data, cookie.cc->evtype);
 				break;
 		}

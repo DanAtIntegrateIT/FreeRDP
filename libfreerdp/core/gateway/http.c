@@ -49,6 +49,7 @@ struct s_http_context
 	char* Method;
 	char* URI;
 	char* UserAgent;
+	char* X_MS_UserAgent;
 	char* Host;
 	char* Accept;
 	char* CacheControl;
@@ -58,6 +59,7 @@ struct s_http_context
 	char* RdgAuthScheme;
 	BOOL websocketUpgrade;
 	char* SecWebsocketKey;
+	wListDictionary* cookies;
 };
 
 struct s_http_request
@@ -68,7 +70,7 @@ struct s_http_request
 	char* AuthParam;
 	char* Authorization;
 	size_t ContentLength;
-	char* Content;
+	char* ContentType;
 	TRANSFER_ENCODING TransferEncoding;
 };
 
@@ -90,6 +92,7 @@ struct s_http_response
 	BYTE* BodyContent;
 
 	wListDictionary* Authenticates;
+	wListDictionary* SetCookie;
 	wStream* data;
 };
 
@@ -128,9 +131,39 @@ static BOOL strings_equals_nocase(const void* obj1, const void* obj2)
 	return _stricmp(obj1, obj2) == 0;
 }
 
+static void* copy_string(const void* ptr)
+{
+	const char* str = ptr;
+	if (!str)
+		return NULL;
+	return _strdup(ptr);
+}
+
 HttpContext* http_context_new(void)
 {
-	return (HttpContext*)calloc(1, sizeof(HttpContext));
+	HttpContext* context = (HttpContext*)calloc(1, sizeof(HttpContext));
+	if (!context)
+		return NULL;
+
+	context->cookies = ListDictionary_New(FALSE);
+	if (!context->cookies)
+		goto fail;
+
+	wObject* key = ListDictionary_KeyObject(context->cookies);
+	wObject* value = ListDictionary_ValueObject(context->cookies);
+	if (!key || !value)
+		goto fail;
+
+	key->fnObjectFree = free;
+	key->fnObjectNew = copy_string;
+	value->fnObjectFree = free;
+	value->fnObjectNew = copy_string;
+
+	return context;
+
+fail:
+	http_context_free(context);
+	return NULL;
 }
 
 BOOL http_context_set_method(HttpContext* context, const char* Method)
@@ -142,6 +175,20 @@ BOOL http_context_set_method(HttpContext* context, const char* Method)
 	context->Method = _strdup(Method);
 
 	if (!context->Method)
+		return FALSE;
+
+	return TRUE;
+}
+
+BOOL http_request_set_content_type(HttpRequest* request, const char* ContentType)
+{
+	if (!request || !ContentType)
+		return FALSE;
+
+	free(request->ContentType);
+	request->ContentType = _strdup(ContentType);
+
+	if (!request->ContentType)
 		return FALSE;
 
 	return TRUE;
@@ -178,6 +225,20 @@ BOOL http_context_set_user_agent(HttpContext* context, const char* UserAgent)
 	context->UserAgent = _strdup(UserAgent);
 
 	if (!context->UserAgent)
+		return FALSE;
+
+	return TRUE;
+}
+
+BOOL http_context_set_x_ms_user_agent(HttpContext* context, const char* X_MS_UserAgent)
+{
+	if (!context || !X_MS_UserAgent)
+		return FALSE;
+
+	free(context->X_MS_UserAgent);
+	context->X_MS_UserAgent = _strdup(X_MS_UserAgent);
+
+	if (!context->X_MS_UserAgent)
 		return FALSE;
 
 	return TRUE;
@@ -278,6 +339,7 @@ BOOL http_context_enable_websocket_upgrade(HttpContext* context, BOOL enable)
 		if (winpr_RAND(key, sizeof(key)) != 0)
 			return FALSE;
 
+		free(context->SecWebsocketKey);
 		context->SecWebsocketKey = crypto_base64_encode(key, sizeof(key));
 		if (!context->SecWebsocketKey)
 			return FALSE;
@@ -302,12 +364,30 @@ BOOL http_context_set_rdg_auth_scheme(HttpContext* context, const char* RdgAuthS
 	return context->RdgAuthScheme != NULL;
 }
 
+BOOL http_context_set_cookie(HttpContext* context, const char* CookieName, const char* CookieValue)
+{
+	if (!context || !CookieName || !CookieValue)
+		return FALSE;
+	if (ListDictionary_Contains(context->cookies, CookieName))
+	{
+		if (!ListDictionary_SetItemValue(context->cookies, CookieName, CookieValue))
+			return FALSE;
+	}
+	else
+	{
+		if (!ListDictionary_Add(context->cookies, CookieName, CookieValue))
+			return FALSE;
+	}
+	return TRUE;
+}
+
 void http_context_free(HttpContext* context)
 {
 	if (context)
 	{
 		free(context->SecWebsocketKey);
 		free(context->UserAgent);
+		free(context->X_MS_UserAgent);
 		free(context->Host);
 		free(context->URI);
 		free(context->Accept);
@@ -317,6 +397,7 @@ void http_context_free(HttpContext* context)
 		free(context->Pragma);
 		free(context->RdgConnectionId);
 		free(context->RdgAuthScheme);
+		ListDictionary_Free(context->cookies);
 		free(context);
 	}
 }
@@ -446,6 +527,48 @@ static BOOL http_encode_authorization_line(wStream* s, const char* AuthScheme,
 	return http_encode_print(s, "Authorization: %s %s\r\n", AuthScheme, AuthParam);
 }
 
+static BOOL http_encode_cookie_line(wStream* s, wListDictionary* cookies)
+{
+	ULONG_PTR* keys = NULL;
+	BOOL status = TRUE;
+
+	if (!s && !cookies)
+		return FALSE;
+
+	ListDictionary_Lock(cookies);
+	const size_t count = ListDictionary_GetKeys(cookies, &keys);
+
+	if (count == 0)
+		goto unlock;
+
+	status = http_encode_print(s, "Cookie: ");
+	if (!status)
+		goto unlock;
+
+	for (size_t x = 0; status && x < count; x++)
+	{
+		char* cur = (char*)ListDictionary_GetItemValue(cookies, (void*)keys[x]);
+		if (!cur)
+		{
+			status = FALSE;
+			continue;
+		}
+		if (x > 0)
+		{
+			status = http_encode_print(s, "; ");
+			if (!status)
+				continue;
+		}
+		status = http_encode_print(s, "%s=%s", (char*)keys[x], cur);
+	}
+
+	status = http_encode_print(s, "\r\n");
+unlock:
+	free(keys);
+	ListDictionary_Unlock(cookies);
+	return status;
+}
+
 wStream* http_request_write(HttpContext* context, HttpRequest* request)
 {
 	wStream* s;
@@ -519,6 +642,24 @@ wStream* http_request_write(HttpContext* context, HttpRequest* request)
 			goto fail;
 	}
 
+	if (context->cookies)
+	{
+		if (!http_encode_cookie_line(s, context->cookies))
+			goto fail;
+	}
+
+	if (request->ContentType)
+	{
+		if (!http_encode_body_line(s, "Content-Type", request->ContentType))
+			goto fail;
+	}
+
+	if (context->X_MS_UserAgent)
+	{
+		if (!http_encode_body_line(s, "X-MS-User-Agent", context->X_MS_UserAgent))
+			goto fail;
+	}
+
 	if (!http_encode_print(s, "\r\n"))
 		goto fail;
 
@@ -547,7 +688,7 @@ void http_request_free(HttpRequest* request)
 	free(request->AuthParam);
 	free(request->AuthScheme);
 	free(request->Authorization);
-	free(request->Content);
+	free(request->ContentType);
 	free(request->Method);
 	free(request->URI);
 	free(request);
@@ -683,6 +824,53 @@ static BOOL http_response_parse_header_field(HttpResponse* response, const char*
 
 		status = ListDictionary_Add(response->Authenticates, authScheme, authValue);
 	}
+	else if (_stricmp(name, "Set-Cookie") == 0)
+	{
+		char* separator = NULL;
+		const char* CookieName = NULL;
+		char* CookieValue = NULL;
+		separator = strchr(value, '=');
+
+		if (separator)
+		{
+			/* Set-Cookie: name=value
+			 * Set-Cookie: name=value; Attribute=value
+			 * Set-Cookie: name="value with spaces"; Attribute=value
+			 */
+			*separator = '\0';
+			CookieName = value;
+			CookieValue = separator + 1;
+			if (*CookieValue == '"')
+			{
+				char* p = CookieValue;
+				while (*p != '"' && *p != '\0')
+				{
+					p++;
+					if (*p == '\\')
+						p++;
+				}
+				*p = '\0';
+			}
+			else
+			{
+				char* p = CookieValue;
+				while (*p != ';' && *p != '\0' && *p != ' ')
+				{
+					p++;
+				}
+				*p = '\0';
+			}
+
+			if (!CookieName || !CookieValue)
+				return FALSE;
+		}
+		else
+		{
+			return FALSE;
+		}
+
+		status = ListDictionary_Add(response->SetCookie, CookieName, CookieValue);
+	}
 
 	return status;
 }
@@ -793,6 +981,8 @@ static BOOL http_use_content_length(const char* cur)
 		pos = 10;
 	else if (_strnicmp(cur, "text/html", 9) == 0)
 		pos = 9;
+	else if (_strnicmp(cur, "application/json", 16) == 0)
+		pos = 16;
 
 	if (pos > 0)
 	{
@@ -821,6 +1011,112 @@ static int print_bio_error(const char* str, size_t len, void* bp)
 	WINPR_UNUSED(bp);
 	WLog_ERR(TAG, "%s", str);
 	return len;
+}
+
+int http_chuncked_read(BIO* bio, BYTE* pBuffer, size_t size,
+                       http_encoding_chunked_context* encodingContext)
+{
+	int status;
+	int effectiveDataLen = 0;
+	WINPR_ASSERT(bio);
+	WINPR_ASSERT(pBuffer);
+	WINPR_ASSERT(encodingContext != NULL);
+	while (TRUE)
+	{
+		switch (encodingContext->state)
+		{
+			case ChunkStateData:
+			{
+				ERR_clear_error();
+				status = BIO_read(
+				    bio, pBuffer,
+				    (size > encodingContext->nextOffset ? encodingContext->nextOffset : size));
+				if (status <= 0)
+					return (effectiveDataLen > 0 ? effectiveDataLen : status);
+
+				encodingContext->nextOffset -= status;
+				if (encodingContext->nextOffset == 0)
+				{
+					encodingContext->state = ChunkStateFooter;
+					encodingContext->headerFooterPos = 0;
+				}
+				effectiveDataLen += status;
+
+				if ((size_t)status == size)
+					return effectiveDataLen;
+
+				pBuffer += status;
+				size -= status;
+			}
+			break;
+			case ChunkStateFooter:
+			{
+				char _dummy[2] = { 0 };
+				WINPR_ASSERT(encodingContext->nextOffset == 0);
+				WINPR_ASSERT(encodingContext->headerFooterPos < 2);
+				ERR_clear_error();
+				status = BIO_read(bio, _dummy, 2 - encodingContext->headerFooterPos);
+				if (status >= 0)
+				{
+					encodingContext->headerFooterPos += status;
+					if (encodingContext->headerFooterPos == 2)
+					{
+						encodingContext->state = ChunkStateLenghHeader;
+						encodingContext->headerFooterPos = 0;
+					}
+				}
+				else
+					return (effectiveDataLen > 0 ? effectiveDataLen : status);
+			}
+			break;
+			case ChunkStateLenghHeader:
+			{
+				BOOL _haveNewLine = FALSE;
+				char* dst = &encodingContext->lenBuffer[encodingContext->headerFooterPos];
+				WINPR_ASSERT(encodingContext->nextOffset == 0);
+				while (encodingContext->headerFooterPos < 10 && !_haveNewLine)
+				{
+					ERR_clear_error();
+					status = BIO_read(bio, dst, 1);
+					if (status >= 0)
+					{
+						if (*dst == '\n')
+							_haveNewLine = TRUE;
+						encodingContext->headerFooterPos += status;
+						dst += status;
+					}
+					else
+						return (effectiveDataLen > 0 ? effectiveDataLen : status);
+				}
+				*dst = '\0';
+				/* strtoul is tricky, error are reported via errno, we also need
+				 * to ensure the result does not overflow */
+				errno = 0;
+				size_t tmp = strtoul(encodingContext->lenBuffer, NULL, 16);
+				if ((errno != 0) || (tmp > SIZE_MAX))
+				{
+					/* denote end of stream if something bad happens */
+					encodingContext->nextOffset = 0;
+					encodingContext->state = ChunkStateEnd;
+					return -1;
+				}
+				encodingContext->nextOffset = tmp;
+				encodingContext->state = ChunkStateData;
+
+				if (encodingContext->nextOffset == 0)
+				{ /* end of stream */
+					WLog_DBG(TAG, "chunked encoding end of stream received");
+					encodingContext->headerFooterPos = 0;
+					encodingContext->state = ChunkStateEnd;
+					return (effectiveDataLen > 0 ? effectiveDataLen : 0);
+				}
+			}
+			break;
+			default:
+				/* invalid state / ChunkStateEnd */
+				return -1;
+		}
+	}
 }
 
 HttpResponse* http_response_recv(rdpTls* tls, BOOL readContentLength)
@@ -922,6 +1218,7 @@ HttpResponse* http_response_recv(rdpTls* tls, BOOL readContentLength)
 			goto out_error;
 
 		response->BodyLength = Stream_GetPosition(response->data) - payloadOffset;
+		WINPR_ASSERT(response->BodyLength == 0);
 		bodyLength = response->BodyLength; /* expected body length */
 
 		if (readContentLength)
@@ -937,6 +1234,8 @@ HttpResponse* http_response_recv(rdpTls* tls, BOOL readContentLength)
 
 					break;
 				}
+				else
+					readContentLength = FALSE; /* prevent chunked read */
 
 				cur = strchr(cur, ';');
 			}
@@ -950,58 +1249,118 @@ HttpResponse* http_response_recv(rdpTls* tls, BOOL readContentLength)
 		}
 
 		/* Fetch remaining body! */
-		while (response->BodyLength < bodyLength)
+		if ((response->TransferEncoding == TransferEncodingChunked) && readContentLength)
 		{
-			int status;
-
-			if (!Stream_EnsureRemainingCapacity(response->data, bodyLength - response->BodyLength))
-				goto out_error;
-
-			ERR_clear_error();
-			status = BIO_read(tls->bio, Stream_Pointer(response->data),
-			                  bodyLength - response->BodyLength);
-
-			if (status <= 0)
+			http_encoding_chunked_context ctx = { 0 };
+			ctx.state = ChunkStateLenghHeader;
+			ctx.nextOffset = 0;
+			ctx.headerFooterPos = 0;
+			int full_len = 0;
+			do
 			{
-				if (!BIO_should_retry(tls->bio))
-				{
-					WLog_ERR(TAG, "Retries exceeded");
-					ERR_print_errors_cb(print_bio_error, NULL);
+				if (!Stream_EnsureRemainingCapacity(response->data, 2048))
 					goto out_error;
+
+				int status = http_chuncked_read(tls->bio, Stream_Pointer(response->data),
+				                                Stream_GetRemainingCapacity(response->data), &ctx);
+				if (status <= 0)
+				{
+					if (!BIO_should_retry(tls->bio))
+					{
+						WLog_ERR(TAG, "Retries exceeded");
+						ERR_print_errors_cb(print_bio_error, NULL);
+						goto out_error;
+					}
+
+					USleep(100);
+				}
+				else
+				{
+					Stream_Seek(response->data, (size_t)status);
+					full_len += status;
+				}
+			} while (ctx.state != ChunkStateEnd);
+			response->BodyLength = full_len;
+			if (response->BodyLength > 0)
+				response->BodyContent = &(Stream_Buffer(response->data))[payloadOffset];
+		}
+		else
+		{
+			while (response->BodyLength < bodyLength)
+			{
+				int status;
+
+				if (!Stream_EnsureRemainingCapacity(response->data,
+				                                    bodyLength - response->BodyLength))
+					goto out_error;
+
+				ERR_clear_error();
+				status = BIO_read(tls->bio, Stream_Pointer(response->data),
+				                  bodyLength - response->BodyLength);
+
+				if (status <= 0)
+				{
+					if (!BIO_should_retry(tls->bio))
+					{
+						WLog_ERR(TAG, "Retries exceeded");
+						ERR_print_errors_cb(print_bio_error, NULL);
+						goto out_error;
+					}
+
+					USleep(100);
+					continue;
 				}
 
-				USleep(100);
-				continue;
+				Stream_Seek(response->data, (size_t)status);
+				response->BodyLength += (unsigned long)status;
+
+				if (response->BodyLength > RESPONSE_SIZE_LIMIT)
+				{
+					WLog_ERR(TAG, "Request body too large! (%" PRIdz " bytes) Aborting!",
+					         response->BodyLength);
+					goto out_error;
+				}
 			}
 
-			Stream_Seek(response->data, (size_t)status);
-			response->BodyLength += (unsigned long)status;
+			if (response->BodyLength > 0)
+				response->BodyContent = &(Stream_Buffer(response->data))[payloadOffset];
 
-			if (response->BodyLength > RESPONSE_SIZE_LIMIT)
+			if (bodyLength != response->BodyLength)
 			{
-				WLog_ERR(TAG, "Request body too large! (%" PRIdz " bytes) Aborting!",
-				         response->BodyLength);
-				goto out_error;
+				WLog_WARN(TAG, "%s unexpected body length: actual: %" PRIuz ", expected: %" PRIuz,
+				          response->ContentType, response->BodyLength, bodyLength);
+
+				if (bodyLength > 0)
+					response->BodyLength = MIN(bodyLength, response->BodyLength);
 			}
-		}
-
-		if (response->BodyLength > 0)
-			response->BodyContent = &(Stream_Buffer(response->data))[payloadOffset];
-
-		if (bodyLength != response->BodyLength)
-		{
-			WLog_WARN(TAG, "%s unexpected body length: actual: %" PRIuz ", expected: %" PRIuz,
-			          response->ContentType, response->BodyLength, bodyLength);
-
-			if (bodyLength > 0)
-				response->BodyLength = MIN(bodyLength, response->BodyLength);
 		}
 	}
+	Stream_SealLength(response->data);
 
 	return response;
 out_error:
 	http_response_free(response);
 	return NULL;
+}
+
+const BYTE* http_response_get_body(HttpResponse* response)
+{
+	if (!response)
+		return NULL;
+
+	return response->BodyContent;
+}
+
+static BOOL set_compare(wListDictionary* dict)
+{
+	WINPR_ASSERT(dict);
+	wObject* key = ListDictionary_KeyObject(dict);
+	wObject* value = ListDictionary_KeyObject(dict);
+	if (!key || !value)
+		return FALSE;
+	key->fnObjectEquals = strings_equals_nocase;
+	value->fnObjectEquals = strings_equals_nocase;
+	return TRUE;
 }
 
 HttpResponse* http_response_new(void)
@@ -1016,13 +1375,21 @@ HttpResponse* http_response_new(void)
 	if (!response->Authenticates)
 		goto fail;
 
+	if (!set_compare(response->Authenticates))
+		goto fail;
+
+	response->SetCookie = ListDictionary_New(FALSE);
+
+	if (!response->SetCookie)
+		goto fail;
+
+	if (!set_compare(response->SetCookie))
+		goto fail;
+
 	response->data = Stream_New(NULL, 2048);
 
 	if (!response->data)
 		goto fail;
-
-	ListDictionary_KeyObject(response->Authenticates)->fnObjectEquals = strings_equals_nocase;
-	ListDictionary_ValueObject(response->Authenticates)->fnObjectEquals = strings_equals_nocase;
 
 	response->TransferEncoding = TransferEncodingIdentity;
 	return response;
@@ -1038,6 +1405,7 @@ void http_response_free(HttpResponse* response)
 
 	free(response->lines);
 	ListDictionary_Free(response->Authenticates);
+	ListDictionary_Free(response->SetCookie);
 	Stream_Free(response->data, TRUE);
 	free(response);
 }
@@ -1092,6 +1460,17 @@ const char* http_response_get_auth_token(HttpResponse* response, const char* met
 		return NULL;
 
 	return ListDictionary_GetItemValue(response->Authenticates, method);
+}
+
+const char* http_response_get_setcookie(HttpResponse* response, const char* cookie)
+{
+	if (!response || !cookie)
+		return NULL;
+
+	if (!ListDictionary_Contains(response->SetCookie, cookie))
+		return NULL;
+
+	return ListDictionary_GetItemValue(response->SetCookie, cookie);
 }
 
 TRANSFER_ENCODING http_response_get_transfer_encoding(HttpResponse* response)

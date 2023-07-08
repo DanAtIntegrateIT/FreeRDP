@@ -22,20 +22,11 @@
 
 #include <winpr/wtypes.h>
 #include <winpr/stream.h>
-#include <winpr/collections.h>
-#include <winpr/interlocked.h>
 
-#include <freerdp/log.h>
-#include <freerdp/utils/ringbuffer.h>
-#include <freerdp/api.h>
-
-#include <freerdp/freerdp.h>
-#include <freerdp/types.h>
-#include <freerdp/settings.h>
+/* needed for BIO */
+#include <openssl/ssl.h>
 
 typedef struct rdp_rdg rdpRdg;
-
-#include "http.h"
 
 FREERDP_LOCAL rdpRdg* rdg_new(rdpContext* context);
 FREERDP_LOCAL void rdg_free(rdpRdg* rdg);

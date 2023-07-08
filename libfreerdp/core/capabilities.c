@@ -599,8 +599,10 @@ static BOOL rdp_read_order_capability_set(wStream* s, rdpSettings* settings)
 
 	if (settings->OrderSupportFlags & ORDER_FLAGS_EXTRA_SUPPORT)
 	{
-		BitmapCacheV3Enabled = settings->OrderSupportFlagsEx & CACHE_BITMAP_V3_SUPPORT;
-		FrameMarkerCommandEnabled = settings->OrderSupportFlagsEx & ALTSEC_FRAME_MARKER_SUPPORT;
+		BitmapCacheV3Enabled =
+		    (settings->OrderSupportFlagsEx & CACHE_BITMAP_V3_SUPPORT) ? TRUE : FALSE;
+		FrameMarkerCommandEnabled =
+		    (settings->OrderSupportFlagsEx & ALTSEC_FRAME_MARKER_SUPPORT) ? TRUE : FALSE;
 	}
 
 	settings->BitmapCacheV3Enabled = BitmapCacheV3Enabled;
@@ -1381,8 +1383,13 @@ static BOOL rdp_apply_input_capability_set(rdpSettings* settings, const rdpSetti
 		 */
 		if (settings->HasHorizontalWheel)
 			settings->HasHorizontalWheel = src->HasHorizontalWheel;
-		if (settings->UnicodeInput)
-			settings->UnicodeInput = src->UnicodeInput;
+		const BOOL UnicodeInput = freerdp_settings_get_bool(settings, FreeRDP_UnicodeInput);
+		if (UnicodeInput)
+		{
+			const BOOL srcVal = freerdp_settings_get_bool(settings, FreeRDP_UnicodeInput);
+			if (!freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, srcVal))
+				return FALSE;
+		}
 		if (settings->HasExtendedMouseEvent)
 			settings->HasExtendedMouseEvent = src->HasExtendedMouseEvent;
 	}
@@ -1428,10 +1435,19 @@ static BOOL rdp_read_input_capability_set(wStream* s, rdpSettings* settings)
 			return FALSE;
 	}
 
-	settings->FastPathInput = inputFlags & (INPUT_FLAG_FASTPATH_INPUT | INPUT_FLAG_FASTPATH_INPUT2);
-	settings->HasHorizontalWheel = (inputFlags & TS_INPUT_FLAG_MOUSE_HWHEEL) ? TRUE : FALSE;
-	settings->UnicodeInput = (inputFlags & INPUT_FLAG_UNICODE) ? TRUE : FALSE;
-	settings->HasExtendedMouseEvent = (inputFlags & INPUT_FLAG_MOUSEX) ? TRUE : FALSE;
+	if (!freerdp_settings_set_bool(settings, FreeRDP_FastPathInput,
+	                               inputFlags &
+	                                   (INPUT_FLAG_FASTPATH_INPUT | INPUT_FLAG_FASTPATH_INPUT2)))
+		return FALSE;
+	if (!freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel,
+	                               (inputFlags & TS_INPUT_FLAG_MOUSE_HWHEEL) ? TRUE : FALSE))
+		return FALSE;
+	if (!freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput,
+	                               (inputFlags & INPUT_FLAG_UNICODE) ? TRUE : FALSE))
+		return FALSE;
+	if (!freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent,
+	                               (inputFlags & INPUT_FLAG_MOUSEX) ? TRUE : FALSE))
+		return FALSE;
 
 	return TRUE;
 }
@@ -1464,7 +1480,7 @@ static BOOL rdp_write_input_capability_set(wStream* s, const rdpSettings* settin
 	if (settings->HasHorizontalWheel)
 		inputFlags |= TS_INPUT_FLAG_MOUSE_HWHEEL;
 
-	if (settings->UnicodeInput)
+	if (freerdp_settings_get_bool(settings, FreeRDP_UnicodeInput))
 		inputFlags |= INPUT_FLAG_UNICODE;
 
 	if (settings->HasExtendedMouseEvent)
@@ -2270,7 +2286,8 @@ static BOOL rdp_read_draw_nine_grid_cache_capability_set(wStream* s, rdpSettings
 	                   settings->DrawNineGridCacheEntries); /* drawNineGridCacheEntries (2 bytes) */
 
 	settings->DrawNineGridEnabled =
-	    drawNineGridSupportLevel & (DRAW_NINEGRID_SUPPORTED | DRAW_NINEGRID_SUPPORTED_V2);
+	    (drawNineGridSupportLevel & (DRAW_NINEGRID_SUPPORTED | DRAW_NINEGRID_SUPPORTED_V2)) ? TRUE
+	                                                                                        : FALSE;
 
 	return TRUE;
 }
@@ -2383,8 +2400,10 @@ static BOOL rdp_read_draw_gdiplus_cache_capability_set(wStream* s, rdpSettings* 
 	Stream_Seek(s, 8);                              /* GdipCacheChunkSize (8 bytes) */
 	Stream_Seek(s, 6);                              /* GdipImageCacheProperties (6 bytes) */
 
-	settings->DrawGdiPlusEnabled = drawGDIPlusSupportLevel & DRAW_GDIPLUS_SUPPORTED;
-	settings->DrawGdiPlusCacheEnabled = drawGdiplusCacheLevel & DRAW_GDIPLUS_CACHE_LEVEL_ONE;
+	settings->DrawGdiPlusEnabled =
+	    (drawGDIPlusSupportLevel & DRAW_GDIPLUS_SUPPORTED) ? TRUE : FALSE;
+	settings->DrawGdiPlusCacheEnabled =
+	    (drawGdiplusCacheLevel & DRAW_GDIPLUS_CACHE_LEVEL_ONE) ? TRUE : FALSE;
 
 	return TRUE;
 }
@@ -2478,7 +2497,7 @@ static BOOL rdp_read_remote_programs_capability_set(wStream* s, rdpSettings* set
 
 	Stream_Read_UINT32(s, railSupportLevel); /* railSupportLevel (4 bytes) */
 
-	settings->RemoteApplicationMode = railSupportLevel & RAIL_LEVEL_SUPPORTED;
+	settings->RemoteApplicationMode = (railSupportLevel & RAIL_LEVEL_SUPPORTED) ? TRUE : FALSE;
 	settings->RemoteApplicationSupportLevel = railSupportLevel;
 	return TRUE;
 }

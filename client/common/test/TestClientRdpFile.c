@@ -276,7 +276,7 @@ int TestClientRdpFile(int argc, char* argv[])
 
 	WINPR_UNUSED(argc);
 	WINPR_UNUSED(argv);
-	winpr_RAND((BYTE*)&id, sizeof(id));
+	winpr_RAND(&id, sizeof(id));
 
 	/* Unicode */
 	file = freerdp_client_rdp_file_new();
@@ -408,6 +408,7 @@ int TestClientRdpFile(int argc, char* argv[])
 	}
 
 	/* Check [MS-RDPECAM] related options */
+#if defined(CHANNEL_RDPECAM_CLIENT)
 	{
 		int x;
 		ADDIN_ARGV* args;
@@ -447,6 +448,7 @@ int TestClientRdpFile(int argc, char* argv[])
 			}
 		}
 	}
+#endif
 
 	/* Check [URBDRC] related options */
 #if defined(CHANNEL_URBDRC_CLIENT)

@@ -24,7 +24,7 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
 
-#include "mf_interface.h"
+#include "mf_types.h"
 #include "mfreerdp.h"
 
 BOOL mf_peer_audin_init(mfPeerContext* context);

@@ -1040,6 +1040,7 @@ static void sdl_post_final_disconnect(freerdp* instance)
 	if (!instance)
 		return;
 
+
 	if (!instance->context)
 		return;
 }

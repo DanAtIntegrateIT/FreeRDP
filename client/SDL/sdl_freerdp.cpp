@@ -856,6 +856,12 @@ static int sdl_run(SdlContext* sdl)
 				break;
 				case SDL_USEREVENT_WINDOW_FULLSCREEN:
 				{
+					//break;
+
+					auto gdi = sdl->context()->gdi;
+
+					gdi_send_suppress_output(gdi, TRUE);
+
 					auto window = static_cast<SDL_Window*>(windowEvent.user.data1);
 					const SDL_bool enter = windowEvent.user.code != 0 ? SDL_TRUE : SDL_FALSE;
 

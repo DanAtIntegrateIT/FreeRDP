@@ -253,6 +253,7 @@ static BOOL sdl_apply_display_properties(SdlContext* sdl)
 		monitor->attributes.orientation = rdp_orientation;
 		monitor->attributes.physicalWidth = rect.w / hdpi;
 		monitor->attributes.physicalHeight = rect.h / vdpi;
+		monitor->is_fullscreen = true;
 	}
 	return TRUE;
 }
@@ -305,18 +306,53 @@ BOOL sdl_detect_monitors(SdlContext* sdl, UINT32* pMaxWidth, UINT32* pMaxHeight)
 	rdpSettings* settings = sdl->context()->settings;
 	WINPR_ASSERT(settings);
 
-	const int numDisplays = SDL_GetNumVideoDisplays();
-	if (!freerdp_settings_set_pointer_len(settings, FreeRDP_MonitorIds, nullptr, numDisplays))
-		return FALSE;
-
-	for (size_t x = 0; x < numDisplays; x++)
-	{
-		if (!freerdp_settings_set_pointer_array(settings, FreeRDP_MonitorIds, x, &x))
+	if (settings->VirtualScreensCount > 0){
+		const int numDisplays = settings->VirtualScreensCount;
+		freerdp_settings_set_uint32(settings, FreeRDP_MonitorCount,numDisplays);
+		if (!freerdp_settings_set_pointer_len(settings, FreeRDP_MonitorIds, nullptr, numDisplays))
 			return FALSE;
+
+		*pMaxWidth = 1027;
+		*pMaxHeight = 768;
+
+		for (int x = 0; x < numDisplays; x++)
+		{
+			auto monitor = static_cast<rdpMonitor*>(
+			    freerdp_settings_get_pointer_array_writable(settings, FreeRDP_MonitorDefArray, x));
+			WINPR_ASSERT(monitor);
+
+			monitor->orig_screen = x;
+			monitor->x = (1024 * x);
+			monitor->y = 100 * x;
+			monitor->width = 1024;
+			monitor->height = 768;
+			monitor->highDpi = false;
+			monitor->is_primary = x == 0;
+			monitor->is_fullscreen = false;
+			monitor->attributes.desktopScaleFactor = 100;
+			monitor->attributes.deviceScaleFactor = 100;
+			monitor->attributes.orientation = ORIENTATION_LANDSCAPE;
+			monitor->attributes.physicalWidth = monitor->width;
+			monitor->attributes.physicalHeight = monitor->height;
+		}
+
+		return sdl_detect_single_window(sdl, pMaxWidth, pMaxHeight);
+
+	}else
+	{
+		const int numDisplays = SDL_GetNumVideoDisplays();
+		if (!freerdp_settings_set_pointer_len(settings, FreeRDP_MonitorIds, nullptr, numDisplays))
+			return FALSE;
+
+		for (size_t x = 0; x < numDisplays; x++)
+		{
+			if (!freerdp_settings_set_pointer_array(settings, FreeRDP_MonitorIds, x, &x))
+				return FALSE;
+		}
+
+		if (!sdl_apply_display_properties(sdl))
+			return FALSE;
+
+		return sdl_detect_single_window(sdl, pMaxWidth, pMaxHeight);
 	}
-
-	if (!sdl_apply_display_properties(sdl))
-		return FALSE;
-
-	return sdl_detect_single_window(sdl, pMaxWidth, pMaxHeight);
 }

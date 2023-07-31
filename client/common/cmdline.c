@@ -3037,12 +3037,24 @@ static int freerdp_client_settings_parse_command_line_arguments_int(rdpSettings*
 		CommandLineSwitchCase(arg, "multimon")
 		{
 			settings->UseMultimon = TRUE;
+			settings->VirtualScreensCount = 0;
 
 			if (arg->Flags & COMMAND_LINE_VALUE_PRESENT)
 			{
 				if (option_equals(arg->Value, "force"))
 				{
 					settings->ForceMultimon = TRUE;
+				}
+				const char* val = NULL;
+				if (val = option_starts_with("screens:",arg->Value))
+				{
+					// /multimon:screens:1024x768@0x0,1024x768@1025x0
+					//We now need to create virtual screen with the given sizes and locations.
+					//The options are passed in as [ScreenWidth]x[ScreenHeight]@[XPosition]x[YPosition]
+					size_t count = 0;
+					settings->VirtualScreens = CommandLineParseCommaSeparatedValues(val, &count);
+					settings->VirtualScreensCount = count;
+
 				}
 			}
 		}

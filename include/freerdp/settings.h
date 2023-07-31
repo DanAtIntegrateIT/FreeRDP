@@ -1686,6 +1686,11 @@ extern "C"
 		ALIGN64 BYTE* SettingsModified; /* byte array marking fields that have been modified from
 		                                   their default value - currently UNUSED! */
 		ALIGN64 char* XSelectionAtom;
+
+		ALIGN64 rdpMonitor* VirtualScreenDefArray;  /*  Added a virtual screen array that represents the screen you wish RDP to display, not the physical monitors.  */
+		ALIGN64 char** VirtualScreens;
+		ALIGN64 INT32 VirtualScreensCount;
+
 	};
 	typedef struct rdp_settings rdpSettings;
 
